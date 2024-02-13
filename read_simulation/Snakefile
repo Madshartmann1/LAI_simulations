@@ -1,0 +1,433 @@
+SAMPLE_RANGE = ["n{}".format(i) for i in range(50)]
+sample_pairs = [(SAMPLE_RANGE[i], SAMPLE_RANGE[i + 1]) for i in range(0, len(SAMPLE_RANGE), 2)]
+INDIVIDUALS = range(25)  # Define 25 individuals
+
+
+rule all:
+    input:
+        expand("variants/{individual}.g.vcf.gz", individual=INDIVIDUALS),
+        dirs = "logs/directory_marker.txt",
+        compressed_reference = "synth_ref/chrom1_synth_refence.fa.gz"
+
+
+rule setup_dirs:
+    output:
+        dirs = touch("logs/directory_marker.txt")
+    priority: 100  # High priority to ensure this runs first
+    shell:
+        "mkdir -p logs reads individual_samples aligned_reads variants tmp synth_ref"
+
+
+
+
+rule open_vcf_file:
+    input:
+        synth_vcf="/home/projects/MAAG/msprime_deme/msprime/results/chrom1_500indi.vcf.gz"
+    output:
+        synth_vcf_open="/home/projects/MAAG/msprime_deme/msprime/results/chrom1_500indi.vcf"
+    shell:
+        """
+        pigz -d {input.synth_vcf}
+        """
+
+
+rule create_synth_refernece:
+    input:
+        ref_genome="/home/projects/MAAG/msprime_deme/refrence_seqs/chromosome1_with_header.fa",
+        synth_vcf="/home/projects/MAAG/msprime_deme/msprime/results/chrom1_500indi.vcf"
+    output:
+        synt_ref="synth_ref/chrom1_synth_refence.fa"
+    shell:
+        """
+        nice -19 \
+        python3 synth_reference.py -i {input.ref_genome} -v {input.synth_vcf} -o {output.synt_ref}
+        """
+
+
+rule close_vcf_file:
+    input:
+        synth_vcf="/home/projects/MAAG/msprime_deme/msprime/results/chrom1_500indi.vcf"
+    output:
+        synth_vcf_open="/home/projects/MAAG/msprime_deme/msprime/results/chrom1_500indi.vcf.gz"
+    shell:
+        """
+        bgzip {input.synth_vcf}
+        """
+
+rule prepare_small_vcf:
+    input:
+        small_vcf_raw="/home/projects/MAAG/msprime_deme/msprime/manual_admix/patchwork_vcf.vcf.gz"
+    output:
+        small_vcf_bgz="/home/projects/MAAG/msprime_deme/msprime/manual_admix/patchwork_vcf_b.vcf.gz"
+    shell:
+        """
+        # Decompress with gunzip -c (or pigz -d -c for parallel decompression) and recompress with bgzip
+        pigz -d -c {input.small_vcf_raw} | bgzip > {output.small_vcf_bgz}
+        """
+
+
+rule index_before_merge:
+    input:
+        large_vcf="/home/projects/MAAG/msprime_deme/msprime/results/chrom1_500indi.vcf.gz",
+        small_vcf="/home/projects/MAAG/msprime_deme/msprime/manual_admix/patchwork_vcf_b.vcf.gz"
+    output:
+        large_vcf_index="/home/projects/MAAG/msprime_deme/msprime/results/chrom1_500indi.vcf.gz.tbi",
+        small_vcf_index="/home/projects/MAAG/msprime_deme/msprime/manual_admix/patchwork_vcf_b.vcf.gz.tbi"
+    shell:
+        """
+        tabix {input.large_vcf}
+        tabix {input.small_vcf}
+        """
+
+
+
+
+rule select_and_merge_vcf_samples:
+    input:
+        large_vcf="/home/projects/MAAG/msprime_deme/msprime/results/chrom1_500indi.vcf.gz",
+        small_vcf="/home/projects/MAAG/msprime_deme/msprime/manual_admix/patchwork_vcf_b.vcf.gz",
+        index_large="/home/projects/MAAG/msprime_deme/msprime/results/chrom1_500indi.vcf.gz.tbi",
+        index_small="/home/projects/MAAG/msprime_deme/msprime/manual_admix/patchwork_vcf_b.vcf.gz.tbi"
+    output:
+        merged_vcf="selected_samples.vcf"
+    shell:
+        """
+        bash select_and_merge_samples.sh {input.large_vcf} {input.small_vcf} {output.merged_vcf}
+        """
+
+
+
+
+
+
+rule generate_haplotype_sequences:
+    input:
+        vcf="selected_samples.vcf", 
+        ref_genome="synth_ref/chrom1_synth_refence.fa"
+    output:
+        haplotype_fa=expand("individual_samples/{sample}.fa.gz", sample=SAMPLE_RANGE),
+        samples_exploded="logs/individual_samples_done.txt"
+    params:
+        samples=SAMPLE_RANGE  # Use the updated SAMPLE_RANGE representing haplotypes
+    shell:
+        """
+        for sample in {params.samples}; do
+            python3 generate_individual_samples.py --vcf {input.vcf} --ref {input.ref_genome} --sample ${{sample}} --output individual_samples/${{sample}}.fa
+            bgzip individual_samples/${{sample}}.fa
+        done
+        touch {output.samples_exploded}
+        """
+
+
+
+
+rule index_individual_samples:
+    input:
+        samples_dir="logs/directory_marker.txt",
+        samples_exploded="logs/individual_samples_done.txt",
+        msprime_fai="selected_samples.vcf"
+    output:
+        touch("logs/indexed_samples_done.txt")
+    params:
+        samples=SAMPLE_RANGE
+    shell:
+        """
+        for sample in {params.samples}; do
+            samtools faidx "individual_samples/${{sample}}.fa.gz"
+        done
+        touch {output}
+        """
+
+
+
+rule get_missing_size_dist:
+    input:
+        size_dist="/home/projects2/DNA_reconstruct/gabrieldir/insertSizes/chagyrskaya8.gz"
+    output:
+        size_dist_unzipped="chagyrskaya8"
+    shell:
+        """
+        pigz -c -d {input.size_dist} > {output.size_dist_unzipped}
+        """
+
+
+rule new_fragSim:
+    input:
+        samples="logs/individual_samples_done.txt",
+        samples_indexed="logs/indexed_samples_done.txt",
+        size_dist="chagyrskaya8"
+    output:
+        fragsim_out="reads/fragsim_ind_{individual}.fa.gz"
+    params:
+        seq1=lambda wildcards: f"individual_samples/{sample_pairs[int(wildcards.individual)][0]}.fa.gz",
+        seq2=lambda wildcards: f"individual_samples/{sample_pairs[int(wildcards.individual)][1]}.fa.gz"
+    shell:
+        """
+        cat \
+        <(/home/ctools/gargammel/src/fragSim -n 73529411 -s {input.size_dist} {params.seq1}) \
+        <(/home/ctools/gargammel/src/fragSim -n 73529411 -s {input.size_dist} {params.seq2}) \
+        | gzip > {output.fragsim_out}
+        """
+
+#scale -n here above to control Coverage, current is 20X for a length of 248.387.328
+# n = (gene_length * C) / avg_frag_len  -> 73529411 = (250m * 20) / 68
+
+rule add_adapters:
+    input:
+        fragsim_out="reads/fragsim_ind_{individual}.fa.gz"
+    output:
+        adapters_out="reads/adaptsim_ind_{individual}.fa"
+    shell:
+        """ 
+        nice -19 \
+        /home/ctools/gargammel/src/adptSim -l 150 -artp {output.adapters_out} {input.fragsim_out}
+        """
+
+rule run_read_generation:
+    input:
+        adapters_out="reads/adaptsim_ind_{individual}.fa"
+    output:
+        fq1="reads/illumina_ind_{individual}_1.fq",
+        fq2="reads/illumina_ind_{individual}_2.fq"
+    shell:
+        """ 
+        nice -19 \
+        /home/ctools/gargammel/art_src_MountRainier_Linux/art_illumina -ss HS25 --in {input.adapters_out} --out reads/illumina_ind_{wildcards.individual}_ --amplicon --paired --len 150 --rcount 1 --noALN
+        """
+
+rule compress_read_generation_and_addapters:
+    input:
+        fq1="reads/illumina_ind_{individual}_1.fq",
+        fq2="reads/illumina_ind_{individual}_2.fq",
+        adapters_out="reads/adaptsim_ind_{individual}.fa"
+    output:
+        fq1_gz="reads/illumina_ind_{individual}_1.fq.gz",
+        fq2_gz="reads/illumina_ind_{individual}_2.fq.gz",
+        adapters_out_gz="reads/adaptsim_ind_{individual}.fa.gz" 
+    shell:
+        """
+        nice -19 pigz {input.fq1}
+        nice -19 pigz {input.fq2}
+        nice -19 pigz {input.adapters_out}
+        """
+
+
+rule merge_and_trim_reads:
+    input:
+        fq1_gz="reads/illumina_ind_{individual}_1.fq.gz",
+        fq2_gz="reads/illumina_ind_{individual}_2.fq.gz"
+    output:
+       trimmed_fq="reads/illumina_ind_{individual}_m.fq.gz"
+    shell:
+        """ 
+        nice -19 \
+        /home/ctools/leehom-1.2.17 --ancientdna -t 16 -fq1 {input.fq1_gz} -fq2 {input.fq2_gz} -fqo reads/illumina_ind_{wildcards.individual}_m
+        """
+
+
+
+
+
+
+rule index_reference_with_bwa:
+    input:
+        synth_ref="synth_ref/chrom1_synth_refence.fa"
+    output:
+        bwa_index_done=touch("logs/bwa_index.done")
+    params:
+        bwa_path="/home/ctools/bwa-0.7.17/bwa"
+    shell:
+        """
+        nice -19 \
+        {params.bwa_path} index {input.synth_ref} && touch {output.bwa_index_done}
+        """
+
+rule align_to_bam:
+    input:
+        bwa_index_done="logs/bwa_index.done",
+        merged_fq="reads/illumina_ind_{individual}_m.fq.gz",
+        synth_ref="synth_ref/chrom1_synth_refence.fa"
+    output:
+        bam="aligned_reads/{individual}_unsorted.bam"
+    params:
+        bwa_path="/home/ctools/bwa-0.7.17/bwa"
+    threads: 4
+    shell:
+        """
+        nice -19 \
+        pigz -d -c {input.merged_fq} | \
+        {params.bwa_path} mem -R "@RG\\tID:{wildcards.individual}\\tSM:{wildcards.individual}\\tPL:ILLUMINA" \
+        {input.synth_ref} - -t {threads} | \
+        samtools view -bS - > {output.bam}
+        """
+
+rule sort_bam:
+    input:
+        bam="aligned_reads/{individual}_unsorted.bam"
+    output:
+        sorted_bam="aligned_reads/{individual}_sorted.bam"
+    params:
+        samtools_path="samtools"
+    shell:
+        """
+        nice -19 \
+        {params.samtools_path} sort \
+        -o {output.sorted_bam} \
+        {input.bam}
+        """
+
+rule mark_duplicates:
+    input:
+        sort_bam="aligned_reads/{individual}_sorted.bam"
+    output:
+        dup_mark_bam="aligned_reads/{individual}_dup_marked.bam",
+        dup_info="aligned_reads/{individual}_marked_dups_metrics.txt"
+    params:
+        gatk_path="/home/ctools/gatk-4.2.1.0/gatk"
+    shell:
+        """
+        nice -19 \
+        python3 {params.gatk_path} MarkDuplicates \
+        -I {input.sort_bam} \
+        -O {output.dup_mark_bam} \
+        -M {output.dup_info} \
+        --QUIET
+        """
+
+
+rule index_bam:
+    input:
+        dup_mark_bam="aligned_reads/{individual}_dup_marked.bam",
+        dup_info="aligned_reads/{individual}_marked_dups_metrics.txt"
+    output:
+        indx_bam="aligned_reads/{individual}_dup_marked.bam.bai"
+    priority: 2
+    shell:
+        """
+        nice -19 \
+        samtools index {input.dup_mark_bam}
+        """
+
+
+rule index_reference_with_gatk:
+    input:
+        synth_ref_genome="synth_ref/chrom1_synth_refence.fa"
+    output:
+        gatk_index_done="synth_ref/chrom1_synth_refence.dict"
+    params:
+        gatk_path="/home/ctools/gatk-4.2.1.0/gatk"
+    shell:
+        """
+        nice -19 \
+        python3 {params.gatk_path} CreateSequenceDictionary -R {input.synth_ref_genome} --QUIET
+        """
+
+rule index_reference_with_samtools:
+    input:
+        synth_ref_genome="synth_ref/chrom1_synth_refence.fa"
+    output:
+        samtools_index_done="synth_ref/chrom1_synth_refence.fa.fai"
+    shell:
+        """
+        nice -19 \
+        samtools faidx {input.synth_ref_genome}
+        """
+
+
+rule gvcf_creation:
+    input:
+        gatk_index_done="synth_ref/chrom1_synth_refence.dict",
+        samtools_index_done="synth_ref/chrom1_synth_refence.fa.fai",
+        indx_bam="aligned_reads/{individual}_dup_marked.bam.bai",
+        dup_marked_bam="aligned_reads/{individual}_dup_marked.bam",
+        synth_reference="synth_ref/chrom1_synth_refence.fa"
+    output:
+        gvcf="variants/{individual}.g.vcf"
+    params:
+        gatk_path="/home/ctools/gatk-4.2.1.0/gatk"
+    priority: 1
+    shell:
+        """
+        nice -19 \
+        python3 {params.gatk_path} HaplotypeCaller \
+        -R {input.synth_reference} \
+        -I {input.dup_marked_bam} \
+        -O {output.gvcf} \
+        -ERC GVCF \
+        --QUIET
+        """
+
+
+
+rule create_sample_map:
+    input:
+        gvcf_list=expand("variants/{individual}.g.vcf", individual=INDIVIDUALS)
+    output:
+        sample_map="variants/cohort.sample_map"
+    run:
+        with open(output.sample_map, 'w') as map_file:
+            for gvcf in input.gvcf_list:
+                sample = os.path.basename(gvcf).split('.')[0]
+                map_file.write(f"{sample}\t{gvcf}\n")
+
+
+
+
+rule import_gvcfs_to_genomicsdb:
+    input:
+        sample_map="variants/cohort.sample_map"
+    output:
+        genomicsdb=directory("variants/genomicsdb")
+    params:
+        gatk_path="/home/ctools/gatk-4.2.1.0/gatk",
+        intervals="chr1:1-248387328",
+        tmp_dir="/tmp"
+    shell:
+        """
+        python3 {params.gatk_path} GenomicsDBImport \
+        --genomicsdb-workspace-path {output.genomicsdb} \
+        --sample-name-map {input.sample_map} \
+        --intervals {params.intervals} \
+        --tmp-dir {params.tmp_dir} \
+        --genomicsdb-shared-posixfs-optimizations true
+        """
+
+rule combine_via_db:
+    input:
+        synth_reference="synth_ref/chrom1_synth_refence.fa",
+        genomicsdb="variants/genomicsdb"
+    output:
+        combined_vcf="variants/all_sample.vcf.gz"
+    params:
+        gatk_path="/home/ctools/gatk-4.2.1.0/gatk"
+    shell:
+        """
+        python3 {params.gatk_path}  GenotypeGVCFs \
+        -R {input.synth_reference} \
+        -V gendb://{input.genomicsdb} \
+        -O {output.combined_vcf}
+        """
+
+
+rule compress_gvcf:
+    input:
+        combined_vcf="variants/all_sample.vcf.gz",
+        gvcf="variants/{individual}.g.vcf"
+    output:
+        gz="variants/{individual}.g.vcf.gz"
+    shell:
+        """
+        nice -19 pigz --best -c {input.gvcf} > {output.gz} &&
+        rm {input.gvcf}
+        """
+
+rule compress_syth_ref:
+    input:
+        combined_vcf="variants/all_sample.vcf.gz",
+        synth_ref="synth_ref/chrom1_synth_refence.fa"
+    output:
+        gz="synth_ref/chrom1_synth_refence.fa.gz"
+    shell:
+        """
+        nice -19 pigz --best {input.synth_ref}
+        """
