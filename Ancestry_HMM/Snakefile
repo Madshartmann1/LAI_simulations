@@ -1,0 +1,145 @@
+
+INDIVIDUALS_LIST = range(20,25)
+
+rule all:
+    input:
+        ahmm_input="ahmm_input_file_vcf.panel",
+        ahmm_output=expand("posterior_files/{individual}_best_posterior.txt", individual=INDIVIDUALS_LIST),
+        scoring_over="scoring_over.done"
+
+
+rule normalize_vcf:
+    input:
+        vcf="/home/projects/MAAG/LAI_sim/read_simulation/variants/all_sample.vcf.gz",
+        bcftools_path="/home/ctools/bcftools-1.13/bcftools"
+    output:
+        norm_vcf="norm.vcf.gz"
+    shell:
+        """
+        nice -19 \
+        {input.bcftools_path} norm -m -any {input.vcf} | bgzip > {output.norm_vcf}
+        """
+
+rule extract_sample_names:
+    input:
+        vcf="norm.vcf.gz"
+    output:
+        txt="sample_names.txt"
+    shell:
+        """
+        bcftools query -l {input.vcf} > {output.txt}
+        """
+
+rule create_sample2pop:
+    input:
+        txt="sample_names.txt"
+    output:
+        tsv="sample2pop.txt"
+    shell:
+        """
+        python3 -c "import pandas as pd; \
+        sample_names = pd.read_csv('{input.txt}', header=None, names=['Sample']); \
+        sample_names['Sample'] = sample_names['Sample'].astype(str); \
+        sample_names['Sample'] = pd.to_numeric(sample_names['Sample'], errors='coerce').fillna(0).astype(int); \
+        sample_names = sample_names.sort_values(by='Sample'); \
+        statuses = ['CEU', 'YRI', 'CHB', 'KAR', 'admixed']; \
+        sample_names['Status'] = [statuses[i // 5 % len(statuses)] for i in range(len(sample_names))]; \
+        sample_names.to_csv('{output.tsv}', sep='\\t', index=False)"
+        """
+
+rule vcf_to_ahmm:
+    input:
+        norm_vcf="norm.vcf.gz",
+        sample_map="sample2pop.txt",
+        vcf2ahmm_script="vcf2ahmm_modified.py"
+    output:
+        ahmm_input="ahmm_input_file_vcf.panel"
+    shell:
+        """
+        rm -f ahmm.ploidy
+        nice -19 python3 {input.vcf2ahmm_script} -v <(zcat {input.norm_vcf}) -s {input.sample_map} -m 0 -g 1 > {output.ahmm_input}
+        """
+
+rule run_ahmm:
+    input:
+        ahmm_input="ahmm_input_file_vcf.panel",
+        ahmm_exe="/home/people/s184284/tools/Ancestry_HMM/src/ancestry_hmm"
+    output:
+        posterior=expand("posterior_files/{individual}.posterior", individual=INDIVIDUALS_LIST)
+    shell:
+        """
+        nice -19 {input.ahmm_exe} -i {input.ahmm_input} -s ahmm.ploidy -a 4 0.17 0.33 0.5 0. -p 0 1 0.25 -p 1 1 0.25 -p 2 1 0.25 -p 3 1 0.25
+        mv 20.posterior posterior_files/
+        mv 21.posterior posterior_files/
+        mv 22.posterior posterior_files/
+        mv 23.posterior posterior_files/
+        mv 24.posterior posterior_files/
+        """
+
+rule find_best_posterior:
+    input:
+        "posterior_files/{individual}.posterior"
+    output:
+        "posterior_files/{individual}_best_posterior.txt"
+    run:
+        translate_column = {
+            "2,0,0,0": "CEU",
+            "1,1,0,0": "CEU/YRI",
+            "1,0,1,0": "CEU/CHB",
+            "1,0,0,1": "CEU/KAR",
+            "0,2,0,0": "YRI",
+            "0,1,1,0": "YRI/CHB",
+            "0,1,0,1": "YRI/KAR",
+            "0,0,2,0": "CHB",
+            "0,0,1,1": "CHB/KAR",
+            "0,0,0,2": "KAR"
+            # Add other combinations as necessary
+        }
+
+        with open(input[0], 'r') as infile, open(output[0], 'w') as outfile:
+            # Read and store the header line
+            header = infile.readline().strip().split('\t')
+            outfile.write(f"{header[1]}\tAncestry\n")
+
+            for line in infile:
+                parts = line.strip().split('\t')
+                if len(parts) > 2:
+                    # Process posterior values
+                    values = parts[2:]
+                    max_value = max(values, key=lambda x: float(x))
+                    max_index = values.index(max_value)
+
+                    # Construct the combination string based on the max_index 
+                    barcode = header[max_index + 2]  # Adjusting index for the first two columns
+                    best_pop = translate_column.get(barcode, "Unknown")
+                
+                    outfile.write(f"{parts[1]}\t{best_pop}\n")
+                else:
+                    outfile.write(line)
+
+
+
+rule score_ancestry_estimation:
+    input:
+        truth="/home/projects/MAAG/msprime_deme/msprime/manual_admix/ancestral_intervals_theoretical.txt.gz",
+        best_posterior="posterior_files/{individual}_best_posterior.txt"
+    output:
+        "scoring_files/{individual}_score.txt"
+    shell:
+        """
+        python3 score_ancestry_estimation.py {input.truth} {input.best_posterior} {output}
+        """
+
+
+rule all_scores_done:
+    input:
+        expand("scoring_files/{individual}_score.txt", individual=INDIVIDUALS_LIST)
+    output:
+        "scoring_over.done"
+    shell:
+        """
+        touch {output}
+        """
+
+
+
