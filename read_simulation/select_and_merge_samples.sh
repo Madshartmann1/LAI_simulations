@@ -17,7 +17,7 @@ samples_1000_1499=$(select_samples_from_large_vcf 1000 1499)
 samples_1499_1999=$(select_samples_from_large_vcf 1499 1999)
 
 # Select random samples from small VCF
-samples_small_vcf=$(bcftools query -l "$small_vcf" | shuf -n 5 | tr '\n' ',' | sed 's/,$//')
+samples_small_vcf=$(bcftools query -l "$small_vcf" | shuf -t 5 | tr '\n' ',' | sed 's/,$//')
 
 
 # Extract and merge the specified samples into a single VCF
