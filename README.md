@@ -1,2 +1,2 @@
 # LAI_simulations
- Code for how to create syntetic VCF and how to estimate origins
+ Code for how to create syntetic VCF with trackable ancestry
