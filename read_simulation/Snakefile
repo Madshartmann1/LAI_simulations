@@ -163,11 +163,45 @@ rule new_fragSim:
         seq2=lambda wildcards: f"individual_samples/{sample_pairs[int(wildcards.individual)][1]}.fa.gz"
     shell:
         """
+        # Define unique temp files based on wildcard
+        temp_seq1="temp_seq1_{wildcards.individual}.fa"
+        temp_seq2="temp_seq2_{wildcards.individual}.fa"
+
+        # Unzip input files to unique temp files
+        gunzip -c {params.seq1} > $temp_seq1
+        gunzip -c {params.seq2} > $temp_seq2
+
+        # Index the fasta files
+        samtools faidx $temp_seq1
+        samtools faidx $temp_seq2
+
+        # Run fragSim using unzipped and indexed files
         cat \
-        <(/home/ctools/gargammel/src/fragSim -n 73529411 -s {input.size_dist} {params.seq1}) \
-        <(/home/ctools/gargammel/src/fragSim -n 73529411 -s {input.size_dist} {params.seq2}) \
+        <(/home/ctools/gargammel/src/fragSim -n 73529411 -s {input.size_dist} $temp_seq1) \
+        <(/home/ctools/gargammel/src/fragSim -n 73529411 -s {input.size_dist} $temp_seq2) \
         | gzip > {output.fragsim_out}
+
+        # Clean up temporary files
+        rm $temp_seq1 $temp_seq2 $temp_seq1.fai $temp_seq2.fai
         """
+
+#rule new_fragSim:
+#    input:
+#        samples="logs/individual_samples_done.txt",
+#        samples_indexed="logs/indexed_samples_done.txt",
+#        size_dist="chagyrskaya8"
+#    output:
+#        fragsim_out="reads/fragsim_ind_{individual}.fa.gz"
+#    params:
+#        seq1=lambda wildcards: f"individual_samples/{sample_pairs[int(wildcards.individual)][0]}.fa.gz",
+#        seq2=lambda wildcards: f"individual_samples/{sample_pairs[int(wildcards.individual)][1]}.fa.gz"
+#    shell:
+#        """
+#        cat \
+#        <(/home/ctools/gargammel/src/fragSim -n 73529411 -s {input.size_dist} {params.seq1}) \
+#        <(/home/ctools/gargammel/src/fragSim -n 73529411 -s {input.size_dist} {params.seq2}) \
+#        | gzip > {output.fragsim_out}
+#        """
 
 #scale -n here above to control Coverage, current is 20X for a length of 248.387.328
 # n = (gene_length * C) / avg_frag_len  -> 73529411 = (250m * 20) / 68

@@ -1,16 +1,21 @@
 
 INDIVIDUALS_LIST = range(20,25)
 
+
+#HARDCODEBAD
+INDIVIDUALS_LIST2 = ["257", "227", "136", "285", "281"]
+
+
 rule all:
     input:
         ahmm_input="ahmm_input_file_vcf.panel",
-        ahmm_output=expand("posterior_files/{individual}_best_posterior.txt", individual=INDIVIDUALS_LIST),
+        ahmm_output=expand("posterior_files/{individual}_best_posterior.txt", individual=INDIVIDUALS_LIST2),
         scoring_over="scoring_over.done"
 
 
 rule normalize_vcf:
     input:
-        vcf="/home/projects/MAAG/LAI_sim/read_simulation/variants/all_sample.vcf.gz",
+        vcf="/home/projects2/MAAG/LAI_sim/read_simulation/variants/all_sample.vcf.gz",
         bcftools_path="/home/ctools/bcftools-1.13/bcftools"
     output:
         norm_vcf="norm.vcf.gz"
@@ -65,22 +70,39 @@ rule run_ahmm:
         ahmm_input="ahmm_input_file_vcf.panel",
         ahmm_exe="/home/people/s184284/tools/Ancestry_HMM/src/ancestry_hmm"
     output:
-        posterior=expand("posterior_files/{individual}.posterior", individual=INDIVIDUALS_LIST)
+        posterior=expand("posterior_files/{individual}.posterior", individual=INDIVIDUALS_LIST),
+        done_file=touch("ahmm_completed.done")
     shell:
         """
-        nice -19 {input.ahmm_exe} -i {input.ahmm_input} -s ahmm.ploidy -a 4 0.17 0.33 0.5 0. -p 0 1 0.25 -p 1 1 0.25 -p 2 1 0.25 -p 3 1 0.25
+        nice -19 {input.ahmm_exe} -i {input.ahmm_input} -s ahmm.ploidy -a 4 0.17 0.33 0.5 0.  -p 0 12 -0.16 -p 1 12 -0.33 -p 2 12 -0.5 -p 3 12 -0.01
         mv 20.posterior posterior_files/
         mv 21.posterior posterior_files/
         mv 22.posterior posterior_files/
         mv 23.posterior posterior_files/
         mv 24.posterior posterior_files/
+        touch {output.done_file}
         """
+
+rule preprocess_extract_ids_and_rename:
+    input:
+        ahmm_complete="ahmm_completed.done"
+    output:
+        touch("ids_extracted.done"),
+        files=expand("posterior_files/{individual}.posterior", individual=['136', '227', '257', '281', '285'])
+    shell:
+        """
+        bash process_ids_and_rename.sh        
+        # Signal completion
+        touch {output}
+        """
+
 
 rule find_best_posterior:
     input:
-        "posterior_files/{individual}.posterior"
+        processed="ids_extracted.done",
+        posterior_files=expand("posterior_files/{individual}.posterior", individual=['136', '227', '257', '281', '285'])
     output:
-        "posterior_files/{individual}_best_posterior.txt"
+        expand("posterior_files/{individual}_best_posterior.txt", individual=['136', '227', '257', '281', '285'])
     run:
         translate_column = {
             "2,0,0,0": "CEU",
@@ -93,29 +115,30 @@ rule find_best_posterior:
             "0,0,2,0": "CHB",
             "0,0,1,1": "CHB/KAR",
             "0,0,0,2": "KAR"
-            # Add other combinations as necessary
         }
 
-        with open(input[0], 'r') as infile, open(output[0], 'w') as outfile:
-            # Read and store the header line
-            header = infile.readline().strip().split('\t')
-            outfile.write(f"{header[1]}\tAncestry\n")
+        for individual_file in input.posterior_files:
+            output_file = individual_file.replace(".posterior", "_best_posterior.txt")
+            with open(individual_file, 'r') as infile, open(output_file, 'w') as outfile:
+                header = infile.readline().strip().split('\t')
+                outfile.write(f"{header[1]}\tAncestry\n")
 
-            for line in infile:
-                parts = line.strip().split('\t')
-                if len(parts) > 2:
-                    # Process posterior values
-                    values = parts[2:]
-                    max_value = max(values, key=lambda x: float(x))
-                    max_index = values.index(max_value)
+                for line in infile:
+                    parts = line.strip().split('\t')
+                    if len(parts) > 2:
+                        values = parts[2:]
+                        max_value = max(values, key=lambda x: float(x))
+                        max_index = values.index(max_value)
 
-                    # Construct the combination string based on the max_index 
-                    barcode = header[max_index + 2]  # Adjusting index for the first two columns
-                    best_pop = translate_column.get(barcode, "Unknown")
-                
-                    outfile.write(f"{parts[1]}\t{best_pop}\n")
-                else:
-                    outfile.write(line)
+                        # Use the header directly to get the corresponding ancestry
+                        barcode = header[max_index + 2]  # Correctly offset to match allele combinations
+                        best_pop = translate_column.get(barcode, "Unknown")
+
+                        outfile.write(f"{parts[1]}\t{best_pop}\n")
+                    else:
+                        outfile.write(line)
+
+
 
 
 
@@ -126,14 +149,13 @@ rule score_ancestry_estimation:
     output:
         "scoring_files/{individual}_score.txt"
     shell:
-        """
-        python3 score_ancestry_estimation.py {input.truth} {input.best_posterior} {output}
-        """
+        "python3 score_ancestry_estimation.py {input.truth} {input.best_posterior} {output}"
+
 
 
 rule all_scores_done:
     input:
-        expand("scoring_files/{individual}_score.txt", individual=INDIVIDUALS_LIST)
+        expand("scoring_files/{individual}_score.txt", individual=['136', '227', '257', '281', '285'])
     output:
         "scoring_over.done"
     shell:
